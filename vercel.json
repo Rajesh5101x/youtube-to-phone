@@ -4,7 +4,6 @@
   ],
   "functions": {
     "api/*.py": {
-      "runtime": "python3.9",
       "maxDuration": 60
     }
   }
