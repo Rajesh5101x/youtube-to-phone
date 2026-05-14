@@ -1,3 +1,11 @@
+import collections
+import collections.abc
+
+# Patch the collections module for compatibility with older libraries
+if not hasattr(collections, 'Sequence'):
+    collections.Sequence = collections.abc.Sequence
+
+
 import os
 import re
 import yt_dlp
