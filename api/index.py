@@ -1,101 +1,80 @@
 import os
 import re
-import socket
 import yt_dlp
 import requests
 from flask import Flask, request, jsonify, send_from_directory
 from urllib.parse import quote, unquote
 from mega import Mega
-
-# --- CONFIGURATION ---
-PORT = 8000
-MACRODROID_URL = "https://trigger.macrodroid.com/bf96afee-13f7-47ef-bc9d-e370ad48108a/autodownload"
-TEMP_DIR = "downloads"
-
-if not os.path.exists(TEMP_DIR):
-    os.makedirs(TEMP_DIR)
+from flask_cors import CORS
 
 app = Flask(__name__)
+CORS(app)
+
+# Vercel allows writing ONLY to /tmp
+TEMP_DIR = "/tmp"
+
 mega = Mega()
 m = mega.login()
 
-state = {
-    "last_file": None,
-    "mega_handle": None
-}
-
-def get_ip():
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect(('8.8.8.8', 1))
-        IP = s.getsockname()[0]
-    except Exception: IP = '127.0.0.1'
-    finally: s.close()
-    return IP
-
-LOCAL_IP = get_ip()
-
-def download_and_upload(youtube_url):
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'outtmpl': f'{TEMP_DIR}/%(title)s.%(ext)s',
-        'noplaylist': True,
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }],
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        print(f"[*] Downloading from YouTube...")
-        info = ydl.extract_info(youtube_url, download=True)
-        base_path = ydl.prepare_filename(info)
-        abs_path = os.path.splitext(base_path)[0] + ".mp3"
-        filename = os.path.basename(abs_path)
-        
-        print(f"[*] Uploading {filename} to Mega...")
-        try:
-            mega_file = m.upload(abs_path)
-            return filename, mega_file
-        except Exception as e:
-            print(f"[-] Mega Upload failed: {e}")
-            return filename, None
+def get_ip(req):
+    # On Vercel, we need the public URL of the deployment
+    return req.host_url.rstrip('/')
 
 @app.route('/start', methods=['GET'])
 def start_process():
     yt_url = request.args.get('url')
+    webhook_url = "https://trigger.macrodroid.com/bf96afee-13f7-47ef-bc9d-e370ad48108a/autodownload"
+    
     if not yt_url:
-        return "Error: Missing 'url' parameter", 400
+        return jsonify({"error": "Missing url"}), 400
 
     try:
-        filename, mega_file = download_and_upload(yt_url)
-        state["last_file"] = filename
-        state["mega_handle"] = mega_file
+        # 1. yt-dlp configuration for Serverless
+        # We use a very fast setting to avoid Vercel timeouts
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'outtmpl': f'{TEMP_DIR}/%(title)s.%(ext)s',
+            'noplaylist': True,
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '128', # Lower quality = faster processing
+            }],
+            # Critical: Point to a static ffmpeg if needed, 
+            # though many vercel runtimes include it in PATH
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(yt_url, download=True)
+            base_path = ydl.prepare_filename(info)
+            abs_path = os.path.splitext(base_path)[0] + ".mp3"
+            filename = os.path.basename(abs_path)
+
+        # 2. Upload to Mega
+        mega_file = m.upload(abs_path)
         
-        # 1. URL for the phone to download the file
-        server_download_url = f"http://{LOCAL_IP}:{PORT}/fetch/{quote(filename)}"
-        
-        # 2. URL for the phone to send the verification report
-        server_verify_url = f"http://{LOCAL_IP}:{PORT}/verify"
-        
-        # 3. Construct MacroDroid Webhook with all 3 parameters
+        # 3. Generate Links
+        base_url = get_ip(request)
+        server_download_url = f"{base_url}/fetch/{quote(filename)}"
+        server_verify_url = f"{base_url}/verify"
+
+        # 4. Trigger MacroDroid
         webhook_params = (
             f"?download_url={quote(server_download_url, safe='')}"
             f"&path={quote(filename)}"
             f"&verify_url={quote(server_verify_url, safe='')}"
         )
         
-        print(f"[*] Triggering MacroDroid...")
-        print(f"[*] Verify URL sent: {server_verify_url}")
-        requests.get(MACRODROID_URL + webhook_params)
-        
+        requests.get(webhook_url + webhook_params)
+
         return jsonify({
             "status": "success",
             "file": filename,
-            "verify_at": server_verify_url
+            "mega_link": m.get_upload_link(mega_file)
         })
+
     except Exception as e:
-        return str(e), 500
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/fetch/<filename>', methods=['GET'])
 def serve_file(filename):
@@ -137,3 +116,10 @@ def verify():
         print(f"❌ FAILED: {target} not found in report.")
         return "Failed", 400
 
+
+# Required for Vercel
+def handler(event, context):
+    return app(event, context)
+
+if __name__ == "__main__":
+    app.run(debug=True)
