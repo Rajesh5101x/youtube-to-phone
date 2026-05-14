@@ -1,10 +1,12 @@
+import sys
+
+# --- VERCEL COMPATIBILITY PATCH START ---
+# This must be at the very top to fix the 'Sequence' ImportError in Python 3.12
 import collections
 import collections.abc
-
-# Patch the collections module for compatibility with older libraries
 if not hasattr(collections, 'Sequence'):
     collections.Sequence = collections.abc.Sequence
-
+# --- VERCEL COMPATIBILITY PATCH END ---
 
 import os
 import re
@@ -13,60 +15,62 @@ import requests
 from flask import Flask, request, jsonify, send_from_directory
 from urllib.parse import quote, unquote
 from mega import Mega
-from flask_cors import CORS
 
 app = Flask(__name__)
-CORS(app)
 
-# Vercel allows writing ONLY to /tmp
+# Vercel only allows writing to /tmp
 TEMP_DIR = "/tmp"
 
+# Initialize Mega (Anonymous for stability)
 mega = Mega()
 m = mega.login()
 
-def get_ip(req):
-    # On Vercel, we need the public URL of the deployment
-    return req.host_url.rstrip('/')
+state = {
+    "last_file": None,
+    "mega_handle": None
+}
+
+def download_and_upload(youtube_url):
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': f'{TEMP_DIR}/%(title)s.%(ext)s',
+        'noplaylist': True,
+        # IMPORTANT: We remove the MP3 postprocessor because Vercel 
+        # usually doesn't have FFmpeg. We will upload the raw audio.
+    }
+    
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        print(f"[*] Downloading from YouTube...")
+        info = ydl.extract_info(youtube_url, download=True)
+        abs_path = ydl.prepare_filename(info)
+        filename = os.path.basename(abs_path)
+        
+        print(f"[*] Uploading {filename} to Mega...")
+        try:
+            mega_file = m.upload(abs_path)
+            return filename, mega_file
+        except Exception as e:
+            print(f"[-] Mega Upload failed: {e}")
+            return filename, None
 
 @app.route('/start', methods=['GET'])
 def start_process():
     yt_url = request.args.get('url')
-    webhook_url = "https://trigger.macrodroid.com/bf96afee-13f7-47ef-bc9d-e370ad48108a/autodownload"
-    
     if not yt_url:
         return jsonify({"error": "Missing url"}), 400
 
     try:
-        # 1. yt-dlp configuration for Serverless
-        # We use a very fast setting to avoid Vercel timeouts
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'outtmpl': f'{TEMP_DIR}/%(title)s.%(ext)s',
-            'noplaylist': True,
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '128', # Lower quality = faster processing
-            }],
-            # Critical: Point to a static ffmpeg if needed, 
-            # though many vercel runtimes include it in PATH
-        }
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(yt_url, download=True)
-            base_path = ydl.prepare_filename(info)
-            abs_path = os.path.splitext(base_path)[0] + ".mp3"
-            filename = os.path.basename(abs_path)
-
-        # 2. Upload to Mega
-        mega_file = m.upload(abs_path)
+        filename, mega_handle = download_and_upload(yt_url)
+        state["last_file"] = filename
+        state["mega_handle"] = mega_handle
         
-        # 3. Generate Links
-        base_url = get_ip(request)
+        # On Vercel, use the request host to build URLs
+        base_url = request.host_url.rstrip('/')
         server_download_url = f"{base_url}/fetch/{quote(filename)}"
         server_verify_url = f"{base_url}/verify"
-
-        # 4. Trigger MacroDroid
+        
+        # MacroDroid Webhook
+        webhook_url = "https://trigger.macrodroid.com/bf96afee-13f7-47ef-bc9d-e370ad48108a/autodownload"
         webhook_params = (
             f"?download_url={quote(server_download_url, safe='')}"
             f"&path={quote(filename)}"
@@ -74,13 +78,12 @@ def start_process():
         )
         
         requests.get(webhook_url + webhook_params)
-
+        
         return jsonify({
             "status": "success",
             "file": filename,
-            "mega_link": m.get_upload_link(mega_file)
+            "verify_at": server_verify_url
         })
-
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
