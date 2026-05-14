@@ -1,12 +1,17 @@
 import sys
-
-# --- VERCEL COMPATIBILITY PATCH START ---
-# This must be at the very top to fix the 'Sequence' ImportError in Python 3.12
 import collections
+
+# Manually inject Sequence into collections so old libraries don't crash
 import collections.abc
-if not hasattr(collections, 'Sequence'):
-    collections.Sequence = collections.abc.Sequence
-# --- VERCEL COMPATIBILITY PATCH END ---
+collections.Sequence = collections.abc.Sequence
+
+# Force the system to use the built-in pathlib, not the broken vendor one
+import pathlib
+sys.modules['pathlib'] = pathlib
+
+# NOW you can do your regular imports
+from flask import Flask, request, jsonify
+# ... rest of your code
 
 import os
 import re
