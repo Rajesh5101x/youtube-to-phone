@@ -1,0 +1,6 @@
+flask
+yt-dlp
+requests
+mega.py
+tenacity>=9.0.0
+pydub
