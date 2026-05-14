@@ -3,13 +3,11 @@
   "builds": [
     {
       "src": "api/index.py",
-      "use": "@vercel/python"
+      "use": "@vercel/python",
+      "config": { "runtime": "python3.12" }
     }
   ],
   "rewrites": [
-    {
-      "source": "/(.*)",
-      "destination": "api/index.py"
-    }
+    { "source": "/(.*)", "destination": "api/index.py" }
   ]
 }
